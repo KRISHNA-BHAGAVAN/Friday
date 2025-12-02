@@ -1,0 +1,21 @@
+{
+  "name": "Gemini Tasks",
+  "short_name": "GeminiTasks",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/512.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}

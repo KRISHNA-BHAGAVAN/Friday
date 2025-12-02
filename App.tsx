@@ -1,31 +1,48 @@
-
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Task, AppSection, SubTask, Reminder } from './types';
 import TaskItem from './components/TaskItem';
 import { analyzeTask } from './services/geminiService';
 
-// Simple beep sound generator
-const playAlarmSound = () => {
-    try {
+// --- AUDIO ENGINE ---
+// We use a global ref pattern or lazy initialization to satisfy browser autoplay policies.
+// The context must be resumed/created after a user gesture.
+let audioCtx: AudioContext | null = null;
+
+const initAudioEngine = () => {
+    if (!audioCtx) {
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-        if (!AudioContext) return;
-        
-        const ctx = new AudioContext();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+        if (AudioContext) {
+            audioCtx = new AudioContext();
+        }
+    }
+    // Always try to resume if suspended (common on Chrome/iOS)
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+};
+
+const playAlarmSound = () => {
+    if (!audioCtx) return;
+    
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
         
         osc.connect(gain);
-        gain.connect(ctx.destination);
+        gain.connect(audioCtx.destination);
         
+        // Alarm sound: High pitch alert
         osc.type = 'square';
-        osc.frequency.setValueAtTime(880, ctx.currentTime); 
-        osc.frequency.setValueAtTime(1760, ctx.currentTime + 0.1); 
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+        osc.frequency.setValueAtTime(1760, audioCtx.currentTime + 0.1); // A6
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.2); // A5
+        osc.frequency.setValueAtTime(1760, audioCtx.currentTime + 0.3); // A6
         
-        gain.gain.setValueAtTime(0.1, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.5);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.8);
         
         osc.start();
-        osc.stop(ctx.currentTime + 0.5);
+        osc.stop(audioCtx.currentTime + 0.8);
     } catch (e) {
         console.error("Audio play failed", e);
     }
@@ -40,20 +57,59 @@ const App: React.FC = () => {
   const [activeSection, setActiveSection] = useState<AppSection>(AppSection.TASKS);
   const [inputValue, setInputValue] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [permissionStatus, setPermissionStatus] = useState<NotificationPermission>(
+    'Notification' in window ? Notification.permission : 'default'
+  );
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
 
   useEffect(() => {
     localStorage.setItem('gemini-tasks', JSON.stringify(tasks));
   }, [tasks]);
 
-  // Request notification permissions
+  // Handle PWA Install Prompt
   useEffect(() => {
-    if ('Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
-      Notification.requestPermission();
-    }
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
   }, []);
 
-  // Reminder Checker Loop
+  const handleInstallClick = () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    installPrompt.userChoice.then((choiceResult: any) => {
+      if (choiceResult.outcome === 'accepted') {
+        setInstallPrompt(null);
+      }
+    });
+  };
+
+  const requestNotificationPermission = async () => {
+      if (!('Notification' in window)) return;
+      const result = await Notification.requestPermission();
+      setPermissionStatus(result);
+      if (result === 'granted') {
+          new Notification("Notifications Enabled", {
+              body: "You will now receive task reminders!",
+              icon: 'https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/128.png'
+          });
+      }
+  };
+
+  // Helper to "wake up" capabilities on interaction
+  const handleUserInteraction = () => {
+      initAudioEngine();
+      if (permissionStatus === 'default') {
+          requestNotificationPermission();
+      }
+  };
+
+  // --- BACKGROUND TIMER WORKER ---
+  // Using a Web Worker prevents the timer from being throttled when the tab is inactive
   useEffect(() => {
+    // 1. Define the check logic (runs on main thread when worker ticks)
     const checkReminders = () => {
       const now = Date.now();
       
@@ -63,16 +119,43 @@ const App: React.FC = () => {
           if (task.completed || !task.reminder || task.reminder.hasNotified) return task;
           
           const dueTime = new Date(task.reminder.isoString).getTime();
+          // Check if due (with a 1-minute window flexibility)
           if (now >= dueTime) {
+            
+            // Trigger Notification
             if (Notification.permission === 'granted') {
-              new Notification(`Reminder: ${task.text}`, {
-                body: `It's time for: ${task.text}`,
-                icon: '/icon.png' 
-              });
+              try {
+                  // We use the ServiceWorkerRegistration if available for more robust mobile notifications
+                  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+                      navigator.serviceWorker.ready.then(registration => {
+                          registration.showNotification(task.reminder?.type === 'alarm' ? '🚨 Alarm' : '🔔 Reminder', {
+                              body: task.text,
+                              icon: 'https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/128.png',
+                              tag: task.id,
+                              renotify: true,
+                              requireInteraction: task.reminder?.type === 'alarm',
+                              data: { url: window.location.href } // Data for click handler
+                          } as any);
+                      });
+                  } else {
+                      // Fallback to standard API
+                      new Notification(task.reminder?.type === 'alarm' ? '🚨 Alarm' : '🔔 Reminder', {
+                        body: task.text,
+                        icon: 'https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/128.png',
+                        tag: task.id,
+                        requireInteraction: task.reminder?.type === 'alarm',
+                      });
+                  }
+              } catch (e) {
+                  console.error("Notification failed", e);
+              }
             }
+            
+            // Trigger Audio
             if (task.reminder.type === 'alarm') {
                 playAlarmSound();
             }
+            
             hasChanges = true;
             return { ...task, reminder: { ...task.reminder, hasNotified: true } };
           }
@@ -82,17 +165,52 @@ const App: React.FC = () => {
       });
     };
 
-    const intervalId = setInterval(checkReminders, 15000); 
-    return () => clearInterval(intervalId);
-  }, []);
+    // 2. Create Inline Worker
+    const workerCode = `
+        self.onmessage = function() {
+            setInterval(() => {
+                self.postMessage('TICK');
+            }, 10000); // Check every 10s
+        };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+
+    // 3. Listen for ticks
+    worker.onmessage = () => {
+        checkReminders();
+    };
+
+    // 4. Start worker
+    worker.postMessage('START');
+
+    return () => worker.terminate();
+  }, []); // Only setup worker once
+
+  // Experimental: Schedule Native Notification (Best effort for 'Killed' state support)
+  const scheduleNativeNotification = (task: Task) => {
+    if (!task.reminder || !('showTrigger' in Notification.prototype)) return;
+    
+    const timestamp = new Date(task.reminder.isoString).getTime();
+    if (timestamp < Date.now()) return;
+
+    if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then(reg => {
+            reg.showNotification(task.text, {
+                tag: task.id,
+                body: task.reminder?.type === 'alarm' ? '🚨 Alarm' : '🔔 Reminder',
+                icon: 'https://fonts.gstatic.com/s/e/notoemoji/latest/1f4dd/128.png',
+                showTrigger: new (window as any).TimestampTrigger(timestamp)
+            } as any);
+        }).catch(err => console.log('Scheduled notification not supported', err));
+    }
+  };
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
+    handleUserInteraction(); // Unlock audio/notifications
+    
     if (!inputValue.trim()) return;
-
-    if ('Notification' in window && Notification.permission === 'default') {
-        Notification.requestPermission();
-    }
 
     const rawInput = inputValue.trim();
     const tempId = crypto.randomUUID();
@@ -114,14 +232,23 @@ const App: React.FC = () => {
     try {
         const analysis = await analyzeTask(rawInput);
         
-        setTasks(prev => prev.map(t => 
-            t.id === tempId ? { 
-              ...t, 
-              text: analysis.text,
-              category: analysis.category,
-              reminder: analysis.reminder
-            } : t
-        ));
+        setTasks(prev => {
+            const newTasks = prev.map(t => 
+                t.id === tempId ? { 
+                  ...t, 
+                  text: analysis.text,
+                  category: analysis.category,
+                  reminder: analysis.reminder
+                } : t
+            );
+            
+            // Try to schedule native notification if available
+            const updatedTask = newTasks.find(t => t.id === tempId);
+            if (updatedTask && updatedTask.reminder) {
+                scheduleNativeNotification(updatedTask);
+            }
+            return newTasks;
+        });
         
         // Auto-switch tab if the user added a specific type of item
         if (analysis.reminder?.recurrence === 'yearly') {
@@ -140,6 +267,7 @@ const App: React.FC = () => {
   };
 
   const toggleTask = (id: string) => {
+    handleUserInteraction();
     setTasks(prev => prev.map(task => {
       if (task.id !== id) return task;
       
@@ -157,7 +285,7 @@ const App: React.FC = () => {
              case 'yearly': nextDue.setFullYear(currentDue.getFullYear() + 1); break;
          }
          
-         return {
+         const nextTask = {
              ...task,
              completed: false,
              reminder: {
@@ -166,6 +294,8 @@ const App: React.FC = () => {
                  hasNotified: false
              }
          };
+         scheduleNativeNotification(nextTask);
+         return nextTask;
       }
       return { ...task, completed: newCompleted };
     }));
@@ -194,7 +324,14 @@ const App: React.FC = () => {
   };
 
   const updateReminder = (id: string, reminder?: Reminder) => {
-    setTasks(prev => prev.map(task => task.id === id ? { ...task, reminder } : task));
+    setTasks(prev => {
+        const newTasks = prev.map(task => task.id === id ? { ...task, reminder } : task);
+        const updated = newTasks.find(t => t.id === id);
+        if (updated && updated.reminder) {
+            scheduleNativeNotification(updated);
+        }
+        return newTasks;
+    });
   };
 
   // Section Filtering & Sorting
@@ -203,30 +340,18 @@ const App: React.FC = () => {
     
     switch (activeSection) {
         case AppSection.TASKS:
-            // Tasks with NO reminder, or reminders that aren't recurring yearly/monthly/weekly (just standard deadlines maybe?)
-            // Simplest separation: No reminder = Task. Reminder = Reminder section.
-            // But strict "No reminder" might hide tasks that just have a deadline. 
-            // Let's say: Reminders section is for things with Recurrence OR explicit Alerts.
-            // Tasks section is for standard To-Dos. 
-            // For now, Strict: No reminder object = Task.
             filtered = tasks.filter(t => !t.reminder);
-            // Sort active first, then by creation
             return filtered.sort((a, b) => (Number(a.completed) - Number(b.completed)) || (b.createdAt - a.createdAt));
             
         case AppSection.REMINDERS:
-            // Has reminder, NOT yearly recurrence (Birthday)
             filtered = tasks.filter(t => t.reminder && t.reminder.recurrence !== 'yearly');
-            // Sort by Date
             return filtered.sort((a, b) => new Date(a.reminder!.isoString).getTime() - new Date(b.reminder!.isoString).getTime());
             
         case AppSection.BIRTHDAYS:
-            // Yearly recurrence
             filtered = tasks.filter(t => t.reminder?.recurrence === 'yearly');
-            // Sort by Date (Month/Day) - Need to normalize years to compare upcoming
             return filtered.sort((a, b) => {
                 const dateA = new Date(a.reminder!.isoString);
                 const dateB = new Date(b.reminder!.isoString);
-                // Reset year to current to compare active months
                 dateA.setFullYear(2000);
                 dateB.setFullYear(2000);
                 return dateA.getTime() - dateB.getTime();
@@ -246,7 +371,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-full max-w-md mx-auto bg-slate-50 relative shadow-2xl overflow-hidden md:rounded-3xl md:h-[95vh] md:my-[2.5vh] md:border border-slate-200 font-sans">
+    <div className="flex flex-col h-full max-w-md mx-auto bg-slate-50 relative shadow-2xl overflow-hidden md:rounded-3xl md:h-[95vh] md:my-[2.5vh] md:border border-slate-200 font-sans" onClick={handleUserInteraction}>
       
       {/* Header */}
       <header className="px-6 pt-10 pb-2 bg-white z-10 flex-shrink-0 transition-colors duration-300">
@@ -259,35 +384,55 @@ const App: React.FC = () => {
                     {new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
                 </p>
             </div>
-            {activeSection === AppSection.BIRTHDAYS ? (
-                <div className="h-10 w-10 bg-pink-100 rounded-xl flex items-center justify-center text-xl shadow-sm">
-                    🎂
-                </div>
-            ) : (
-                <div className="h-10 w-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600 font-bold shadow-sm">
-                    {filteredTasks.filter(t => !t.completed).length}
-                </div>
-            )}
+            
+            <div className="flex items-center gap-2">
+                {installPrompt && (
+                   <button
+                     onClick={handleInstallClick}
+                     className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-indigo-700 transition-colors"
+                   >
+                     Install App
+                   </button>
+                )}
+                {permissionStatus !== 'granted' && (
+                    <button 
+                        onClick={requestNotificationPermission}
+                        className="h-10 w-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center animate-pulse"
+                        title="Enable Notifications"
+                    >
+                        🔔
+                    </button>
+                )}
+                {activeSection === AppSection.BIRTHDAYS ? (
+                    <div className="h-10 w-10 bg-pink-100 rounded-xl flex items-center justify-center text-xl shadow-sm">
+                        🎂
+                    </div>
+                ) : (
+                    <div className="h-10 w-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600 font-bold shadow-sm">
+                        {filteredTasks.filter(t => !t.completed).length}
+                    </div>
+                )}
+            </div>
         </div>
 
         {/* Navigation Tabs */}
         <nav className="flex space-x-6 border-b border-slate-100 pb-px">
             <button 
-                onClick={() => setActiveSection(AppSection.TASKS)}
+                onClick={() => { setActiveSection(AppSection.TASKS); handleUserInteraction(); }}
                 className={`pb-3 text-sm font-medium transition-all duration-200 relative ${activeSection === AppSection.TASKS ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
             >
                 Tasks
                 {activeSection === AppSection.TASKS && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full"></div>}
             </button>
             <button 
-                onClick={() => setActiveSection(AppSection.REMINDERS)}
+                onClick={() => { setActiveSection(AppSection.REMINDERS); handleUserInteraction(); }}
                 className={`pb-3 text-sm font-medium transition-all duration-200 relative ${activeSection === AppSection.REMINDERS ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
             >
                 Reminders
                 {activeSection === AppSection.REMINDERS && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full"></div>}
             </button>
             <button 
-                onClick={() => setActiveSection(AppSection.BIRTHDAYS)}
+                onClick={() => { setActiveSection(AppSection.BIRTHDAYS); handleUserInteraction(); }}
                 className={`pb-3 text-sm font-medium transition-all duration-200 relative ${activeSection === AppSection.BIRTHDAYS ? 'text-pink-600' : 'text-slate-400 hover:text-slate-600'}`}
             >
                 Birthdays
@@ -308,6 +453,11 @@ const App: React.FC = () => {
                  {activeSection === AppSection.REMINDERS && "No upcoming reminders"}
                  {activeSection === AppSection.BIRTHDAYS && "No birthdays added"}
              </p>
+             {permissionStatus !== 'granted' && (
+                 <button onClick={requestNotificationPermission} className="mt-4 text-xs bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-lg">
+                     Enable Notifications
+                 </button>
+             )}
           </div>
         ) : (
           filteredTasks.map(task => (
@@ -343,6 +493,7 @@ const App: React.FC = () => {
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
+            onFocus={handleUserInteraction}
             placeholder={
                 activeSection === AppSection.TASKS ? "Add a new task..." :
                 activeSection === AppSection.REMINDERS ? "Set a reminder (e.g. Call Mom at 5pm)" :

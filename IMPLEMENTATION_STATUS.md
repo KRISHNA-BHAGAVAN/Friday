@@ -5,61 +5,72 @@
 
 ## 1. Core Features Implemented
 
+### Architecture & Navigation
+- **Section-Based Layout:** The application is now divided into three distinct context-aware sections:
+  1.  **Tasks:** Standard to-do items without strict time constraints.
+  2.  **Reminders:** Time-sensitive tasks with notifications or alarms.
+  3.  **Birthdays:** Recurring yearly events with specific styling and default behaviors.
+- **Auto-Sorting:** The AI (`analyzeTask`) automatically routes new items to the correct section (e.g., "Buy milk" -> Tasks, "Call Mom at 5" -> Reminders, "Dad's Bday" -> Birthdays).
+
 ### Task Management
 - **CRUD Operations:** Create, Read, Update (Inline text editing), Delete.
 - **Persistence:** LocalStorage synchronization (`gemini-tasks` key).
-- **Filtering:** Filter views for All, Active, and Completed tasks.
-
-### Subtasks
-- **Manual Management:** Users can add and delete subtasks manually via the UI.
-- **AI Breakdown:** Uses Gemini (`gemini-2.5-flash`) to generate actionable subtasks for complex parent tasks.
-- **UI:** Expandable/Collapsible accordion design; progress tracking (completed/total).
+- **Subtasks:** 
+  - Manual addition/deletion.
+  - AI-powered breakdown using Gemini (`gemini-2.5-flash`).
 
 ### Smart Reminders & NLP
-- **Natural Language Parsing:** The `analyzeTask` service uses AI to extract metadata from user input:
-  - *Input:* "Buy milk tomorrow at 5pm"
-  - *Output:* Cleans text to "Buy milk", sets Category to "🥛", sets Reminder ISO timestamp.
-- **Recurrence:** Supports `daily`, `weekly`, `monthly`, `yearly`.
-- **Completion Logic:** Recurring tasks are rescheduled (date bumped forward) rather than marked completed.
-- **Notifications:** Browser Notification API integration with a 30-second polling interval in `App.tsx` to trigger alerts.
+- **Natural Language Parsing:** 
+  - Extracts dates, times, and recurrence patterns (Daily, Weekly, Monthly, Yearly).
+  - Detects intent for "Alarms" (sound) vs "Notifications" (silent).
+  - **Birthday Logic:** Automatically defaults detected birthdays to 00:00 (midnight) and sets recurrence to 'Yearly'.
+- **Advanced Configuration UI:**
+  - **Split Inputs:** Separate native Date and Time pickers for better usability.
+  - **Smart Chips:** One-tap quick actions (e.g., "Tomorrow Morning", "Next Week").
+  - **Mode Toggle:** Switch between "🔔 Notify" (System Notification) and "⏰ Alarm" (Sound).
+
+### Notifications & Audio
+- **Browser Notifications:** 15-second polling interval triggers system notifications for due items.
+- **Audio Alarms:** Implements `window.AudioContext` with an oscillator to play a distinct beep sound for tasks marked as 'Alarm'.
+- **Rescheduling:** Recurring tasks are automatically moved to the next interval upon completion.
 
 ## 2. Codebase Structure
 
 ### `types.ts`
-Defines the core data models:
-- **Task:** Includes `id`, `text`, `completed`, `subtasks[]`, `category`, and `reminder?`.
-- **Reminder:** `{ isoString: string, recurrence?: 'daily' | 'weekly'..., hasNotified?: boolean }`.
+- **AppSection Enum:** `TASKS`, `REMINDERS`, `BIRTHDAYS`.
+- **Reminder Interface:** Updated to include `type: 'notification' | 'alarm'`.
+- **ThemeColor Enum:** For future theming support.
 
 ### `services/geminiService.ts`
-Handles interactions with the Google GenAI SDK.
-- **`breakDownTask(text)`:** Generates a JSON array of subtasks strings.
-- **`analyzeTask(input)`:** Generates a JSON object containing cleaned text, emoji category, and specific reminder details based on the user's current timezone.
+- **`breakDownTask`:** Breaks complex tasks into subtasks.
+- **`analyzeTask`:** 
+  - Enhanced prompt to handle timezone-aware date parsing.
+  - Specific logic to default birthdays to midnight yearly events.
+  - Returns `alarm` vs `notification` type based on user keywords (e.g., "wake me up").
 
 ### `components/TaskItem.tsx`
-The primary UI component for a single task row.
-- **State:** Handles `isExpanded`, `isEditing` (inline text edit), and `isAddingSubtask`.
-- **Logic:**
-  - Formats relative dates (Today, Tomorrow).
-  - Handles "click-to-edit" vs "click-to-expand" distinction.
-  - Visual cues for overdue tasks (red text).
+- **Visuals:** Redesigned card layout with hover effects and distinct "Birthday" styling.
+- **Interactivity:** 
+  - Click text to inline-edit.
+  - Click card body to expand details.
+- **Edit Panel:** A comprehensive editing suite inside the expanded view for managing subtasks and fine-tuning reminder settings.
 
 ### `App.tsx`
-Root component managing global state.
-- **State:** `tasks` list, `filter` mode.
-- **Effects:**
-  - `setInterval` loop for checking due reminders.
-  - Initial Notification permission request.
-  - Optimistic UI updates when adding tasks (adds immediately, then updates with AI analysis results).
+- **State Management:** Handles the filtered views based on `activeSection`.
+- **Audio:** Contains the `playAlarmSound` utility.
+- **Loop:** Runs the background check for due reminders.
 
 ## 3. UI/UX Design
-- **Styling:** Tailwind CSS.
-- **Layout:** Mobile-first, max-width wrapper simulating a mobile app view on desktop.
-- **Interactions:** Smooth transitions, sticky bottom input bar, custom scrollbars.
+- **Aesthetics:** Clean, professional interface using Tailwind CSS with a soft color palette (Indigo/Slate/Pink).
+- **Context Awareness:** 
+  - The input bar changes color and placeholder text based on the active section.
+  - "Birthdays" section has unique festive iconography.
+- **Mobile-First:** optimized touch targets, sticky bottom input, and hide-scrollbars utility.
 
 ## 4. Pending / Future Considerations
-- **Data Migration:** No schema versioning yet; major type changes might require clearing LocalStorage.
-- **Error Handling:** Basic console logging for AI failures; could be improved with UI toasts.
-- **Offline Support:** PWA manifest and Service Workers are not yet configured.
+- **Data Migration:** Schema changes are currently handled by checking for undefined properties, but a robust migration strategy is needed for production.
+- **Sound Customization:** Currently uses a generated beep; could allow uploading custom sounds.
+- **PWA:** Service Worker integration is needed for offline notifications and reliable background alarms.
 
 ---
 *Use this file to restore context in future sessions.*
