@@ -1,3 +1,4 @@
+
 export interface SubTask {
   id: string;
   text: string;
@@ -8,6 +9,7 @@ export interface Reminder {
   isoString: string;
   recurrence?: 'daily' | 'weekly' | 'yearly' | 'monthly';
   hasNotified?: boolean;
+  type?: 'notification' | 'alarm';
 }
 
 export interface Task {
@@ -21,10 +23,10 @@ export interface Task {
   reminder?: Reminder;
 }
 
-export enum FilterType {
-  ALL = 'ALL',
-  ACTIVE = 'ACTIVE',
-  COMPLETED = 'COMPLETED'
+export enum AppSection {
+  TASKS = 'TASKS',
+  REMINDERS = 'REMINDERS',
+  BIRTHDAYS = 'BIRTHDAYS'
 }
 
 export enum ThemeColor {

@@ -57,6 +57,8 @@ export const analyzeTask = async (input: string): Promise<{ text: string; catego
         3. "reminder": If there is a specific time/date or recurrence mentioned, provide details. Otherwise null.
            - "isoString": The ISO 8601 timestamp for the NEXT occurrence.
            - "recurrence": "daily", "weekly", "monthly", "yearly" or null.
+           - "type": "alarm" if the user explicitly mentions "alarm", "wake me up", or "alert". Otherwise "notification".
+           - IMPORTANT: If the task is a "Birthday" (e.g., "John's birthday"), default the time to 00:00:00 (start of day) and recurrence to "yearly", unless the user specifies otherwise.
         
         Return JSON.
       `,
@@ -72,6 +74,7 @@ export const analyzeTask = async (input: string): Promise<{ text: string; catego
               properties: {
                 isoString: { type: Type.STRING },
                 recurrence: { type: Type.STRING, enum: ["daily", "weekly", "monthly", "yearly"] },
+                type: { type: Type.STRING, enum: ["notification", "alarm"] }
               },
               nullable: true,
             }
