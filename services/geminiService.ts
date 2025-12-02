@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { Reminder } from "../types";
 
 // Initialize the client
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -38,19 +39,64 @@ export const breakDownTask = async (taskText: string): Promise<string[]> => {
 };
 
 /**
- * Suggests a category icon/emoji for a task.
+ * Analyzes task input to extract clean text, category, and reminder details.
  */
-export const suggestCategory = async (taskText: string): Promise<string> => {
-    try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `Suggest a single emoji that best represents this task: "${taskText}". Return only the emoji character.`,
-            config: {
-                maxOutputTokens: 5,
+export const analyzeTask = async (input: string): Promise<{ text: string; category: string; reminder?: Reminder }> => {
+  const now = new Date().toISOString();
+  const userLocale = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `
+        Analyze this task input: "${input}".
+        Current time: ${now}. User Timezone: ${userLocale}.
+        
+        1. "text": The task description with time/date words removed (e.g. "Buy milk tomorrow" -> "Buy milk").
+        2. "category": A single emoji representing the task.
+        3. "reminder": If there is a specific time/date or recurrence mentioned, provide details. Otherwise null.
+           - "isoString": The ISO 8601 timestamp for the NEXT occurrence.
+           - "recurrence": "daily", "weekly", "monthly", "yearly" or null.
+        
+        Return JSON.
+      `,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            text: { type: Type.STRING },
+            category: { type: Type.STRING },
+            reminder: {
+              type: Type.OBJECT,
+              properties: {
+                isoString: { type: Type.STRING },
+                recurrence: { type: Type.STRING, enum: ["daily", "weekly", "monthly", "yearly"] },
+              },
+              nullable: true,
             }
-        });
-        return response.text?.trim() || '📝';
-    } catch (error) {
-        return '📝';
+          },
+          required: ["text", "category"]
+        }
+      }
+    });
+
+    if (response.text) {
+      const data = JSON.parse(response.text);
+      // Validate structure roughly
+      return {
+        text: data.text || input,
+        category: data.category || '📝',
+        reminder: data.reminder || undefined
+      };
     }
-}
+    throw new Error("Empty response");
+  } catch (error) {
+    console.error("Gemini analysis failed:", error);
+    // Fallback
+    return {
+      text: input,
+      category: '📝'
+    };
+  }
+};

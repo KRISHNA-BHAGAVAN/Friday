@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Task, FilterType, SubTask } from './types';
+import { Task, FilterType, SubTask, Reminder } from './types';
 import TaskItem from './components/TaskItem';
-import { suggestCategory } from './services/geminiService';
+import { analyzeTask } from './services/geminiService';
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>(() => {
@@ -17,35 +17,93 @@ const App: React.FC = () => {
     localStorage.setItem('gemini-tasks', JSON.stringify(tasks));
   }, [tasks]);
 
+  // Request notification permissions on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Check for due reminders every 30 seconds
+  useEffect(() => {
+    const checkReminders = () => {
+      const now = Date.now();
+      
+      setTasks(currentTasks => {
+        let hasChanges = false;
+        const updatedTasks = currentTasks.map(task => {
+          if (task.completed || !task.reminder || task.reminder.hasNotified) return task;
+          
+          const dueTime = new Date(task.reminder.isoString).getTime();
+          // Trigger if time is passed or within the last minute (to capture exact triggers)
+          if (now >= dueTime) {
+            // Trigger Notification
+            if (Notification.permission === 'granted') {
+              new Notification(`Reminder: ${task.text}`, {
+                body: `It's time for: ${task.text}`,
+                icon: '/icon.png' // Optional: would need a real asset
+              });
+            }
+            hasChanges = true;
+            return {
+              ...task,
+              reminder: {
+                ...task.reminder,
+                hasNotified: true
+              }
+            };
+          }
+          return task;
+        });
+        
+        return hasChanges ? updatedTasks : currentTasks;
+      });
+    };
+
+    const intervalId = setInterval(checkReminders, 30000); // Check every 30s
+    return () => clearInterval(intervalId);
+  }, []);
+
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputValue.trim()) return;
 
-    const newTaskText = inputValue.trim();
+    // Ask for permission if not yet decided on first add
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+
+    const rawInput = inputValue.trim();
     const tempId = crypto.randomUUID();
     
-    // Optimistic UI update
-    const newTask: Task = {
+    // Optimistic UI update - Initial State
+    const tempTask: Task = {
       id: tempId,
-      text: newTaskText,
+      text: rawInput,
       completed: false,
       createdAt: Date.now(),
       subtasks: [],
-      category: '...' 
+      category: '...',
     };
 
-    setTasks(prev => [newTask, ...prev]);
+    setTasks(prev => [tempTask, ...prev]);
     setInputValue('');
     setIsAdding(true);
 
     try {
-        // Fetch AI category in background
-        const categoryEmoji = await suggestCategory(newTaskText);
+        // AI Analysis for text cleanup, category, and reminders
+        const analysis = await analyzeTask(rawInput);
+        
         setTasks(prev => prev.map(t => 
-            t.id === tempId ? { ...t, category: categoryEmoji } : t
+            t.id === tempId ? { 
+              ...t, 
+              text: analysis.text,
+              category: analysis.category,
+              reminder: analysis.reminder
+            } : t
         ));
     } catch (error) {
-        // Silently fail to default category
+        // Fallback to basic task
         setTasks(prev => prev.map(t => 
             t.id === tempId ? { ...t, category: '📝' } : t
         ));
@@ -55,9 +113,38 @@ const App: React.FC = () => {
   };
 
   const toggleTask = (id: string) => {
-    setTasks(prev => prev.map(task => 
-      task.id === id ? { ...task, completed: !task.completed } : task
-    ));
+    setTasks(prev => prev.map(task => {
+      if (task.id !== id) return task;
+      
+      const newCompleted = !task.completed;
+      
+      // Handle Recurring Logic
+      if (newCompleted && task.reminder?.recurrence) {
+         // Calculate next date based on recurrence
+         const currentDue = new Date(task.reminder.isoString);
+         let nextDue = new Date(currentDue);
+         
+         switch(task.reminder.recurrence) {
+             case 'daily': nextDue.setDate(currentDue.getDate() + 1); break;
+             case 'weekly': nextDue.setDate(currentDue.getDate() + 7); break;
+             case 'monthly': nextDue.setMonth(currentDue.getMonth() + 1); break;
+             case 'yearly': nextDue.setFullYear(currentDue.getFullYear() + 1); break;
+         }
+         
+         // Don't mark as completed, just push date forward
+         return {
+             ...task,
+             completed: false,
+             reminder: {
+                 ...task.reminder,
+                 isoString: nextDue.toISOString(),
+                 hasNotified: false
+             }
+         };
+      }
+
+      return { ...task, completed: newCompleted };
+    }));
   };
 
   const deleteTask = (id: string) => {
@@ -76,9 +163,14 @@ const App: React.FC = () => {
       const newSubtasks = task.subtasks.map(st => 
         st.id === subtaskId ? { ...st, completed: !st.completed } : st
       );
-      // Auto-complete parent if all subtasks are done (optional UX choice, keeping manual for now)
       return { ...task, subtasks: newSubtasks };
     }));
+  };
+
+  const updateTask = (id: string, newText: string) => {
+    setTasks(prev => prev.map(task => 
+      task.id === id ? { ...task, text: newText } : task
+    ));
   };
 
   const filteredTasks = useMemo(() => {
@@ -147,6 +239,7 @@ const App: React.FC = () => {
               onDelete={deleteTask}
               onUpdateSubtasks={updateSubtasks}
               onToggleSubtask={toggleSubtask}
+              onUpdateTask={updateTask}
             />
           ))
         )}
@@ -167,7 +260,7 @@ const App: React.FC = () => {
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Add a new task..."
+            placeholder="Add a task (e.g., 'Daily standup at 10am')"
             className="flex-1 py-3 bg-transparent outline-none text-slate-800 placeholder:text-slate-400 text-lg"
           />
           <button 

@@ -4,6 +4,12 @@ export interface SubTask {
   completed: boolean;
 }
 
+export interface Reminder {
+  isoString: string;
+  recurrence?: 'daily' | 'weekly' | 'yearly' | 'monthly';
+  hasNotified?: boolean;
+}
+
 export interface Task {
   id: string;
   text: string;
@@ -12,6 +18,7 @@ export interface Task {
   subtasks: SubTask[];
   isAiGenerating?: boolean; // UI state for loading
   category?: string;
+  reminder?: Reminder;
 }
 
 export enum FilterType {
